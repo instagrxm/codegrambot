@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "name": "codegrambot",
+  "builds": [
+    {
+      "src": "dist/index.js",
+      "use": "@now/node-server"
+    }
+  ]
+}
