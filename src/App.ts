@@ -1,65 +1,76 @@
-import { IgApiClient, IgCheckpointError } from 'instagram-private-api';
-import { sample } from 'lodash';
-const inquirer = require('inquirer');
-// import { LocalStorage } from 'node-localstorage';
-// const storage = new LocalStorage('./instagram_data');
+import {
+  IgApiClient,
+  DirectThreadEntity,
+} from 'instagram-private-api';
+
+import { main } from './message_service';
+import { login } from './login';
+
+let message_state = {};
 
 const ig = new IgApiClient();
 
-// You must generate device id's before login.
-// Id's generated based on seed
-// So if you pass the same value as first argument - the same id's are generated every time
-ig.state.generateDevice(process.env.IG_USERNAME);
-
-// Optionally you can setup proxy url
-// ig.state.proxyUrl = process.env.IG_PROXY;
-
 export const init = (async () => {
-  // Execute all requests prior to authorization in the real Android application
-  // Not required but recommended
-  await ig.simulate.preLoginFlow();
+  const user = await login(ig);
 
-  let loggedInUser = null;
-  try {
-    loggedInUser = await ig.account.login(process.env.IG_USERNAME, process.env.IG_PASSWORD);
-  } catch (err) {
-    if (err instanceof IgCheckpointError) {
-      console.log(ig.state.checkpoint); // Checkpoint info here
-      await ig.challenge.auto(true);
-      // Requesting sms-code or click "It was me" button
+  const replyToThread = async (thread_id, item_id, reply_text) => {
+    const thread = await ig.entity.directThread(thread_id);
 
-      console.log(ig.state.checkpoint); // Challenge info here
-      const { code } = await inquirer.prompt([
-        {
-          type: 'input',
-          name: 'code',
-          message: 'Enter code',
-        },
-      ]);
+    thread.markItemSeen(item_id);
 
-      loggedInUser = await ig.account.login(process.env.IG_USERNAME, process.env.IG_PASSWORD);
-    } else {
-      console.error('Unknown error', err);
-      return
+    if (reply_text) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      thread.broadcastText(reply_text);
     }
   }
 
-  // The same as preLoginFlow()
-  // Optionally wrap it to process.nextTick so we dont need to wait ending of this bunch of requests
-  process.nextTick(async () => await ig.simulate.postLoginFlow());
-  // Create UserFeed instance to get loggedInUser's posts
-  const userFeed = ig.feed.user(loggedInUser.pk);
-  const myPostsFirstPage = await userFeed.items();
-  // All the feeds are auto-paginated, so you just need to call .items() sequentially to get next page
-  const myPostsSecondPage = await userFeed.items();
-  await ig.media.like({
-    // Like our first post from first page or first post from second page randomly
-    mediaId: sample([myPostsFirstPage[0].id, myPostsSecondPage[0].id]),
-    moduleInfo: {
-      module_name: 'profile',
-      user_id: loggedInUser.pk,
-      username: loggedInUser.username,
-    },
-    d: sample([0, 1]),
-  });
+  const new_messages = await updateState(user, ig);
+
+  console.log('new_messages', new_messages);
+
+  setInterval(() => {
+    main(() => updateState(user, ig), replyToThread)
+  }, 5000)
+
 });
+
+const updateState = async (viewer, client: IgApiClient) => {
+  const threads = await client.feed.directInbox().items();
+
+  let old_state = message_state
+  let new_state = {}
+  let new_messages = {}
+
+  threads.forEach(thread => {
+    const thread_id = thread.thread_id
+
+    const last_item_id = thread.last_permanent_item.item_id
+    const last_seen_item_id = thread.last_seen_at && thread.last_seen_at[viewer.pk].item_id
+    const user_pk = !thread.is_group && thread.users[0] && thread.users[0].pk
+
+    const thread_data = {
+      last_item_id,
+      last_seen_item_id,
+      user_pk,
+      ...thread,
+    }
+
+    console.log('has_new_messages',
+      last_item_id !== last_seen_item_id,
+      last_item_id, last_seen_item_id,
+    )
+
+    const has_new_messages = last_item_id !== last_seen_item_id
+
+    if (has_new_messages) {
+      new_messages[ thread_id ] = thread_data
+    }
+
+    new_state[ thread_id ] = thread_data
+  })
+
+  message_state = new_state
+
+  return new_messages
+}
